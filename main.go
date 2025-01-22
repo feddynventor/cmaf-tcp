@@ -23,6 +23,12 @@ func (c *Client) MarkAsPlaying() {
 	fmt.Println(c.conn.RemoteAddr(), "is now playing")
 }
 
+func (c *Client) Delete() {
+	delete(clients, c.id)
+	c.conn.Close()
+	fmt.Println(c.conn.RemoteAddr(), "disconnected")
+}
+
 type InputStream struct {
 	pipe      *os.File
 	moov      []byte
@@ -43,22 +49,16 @@ func (stream *InputStream) readStream() error {
 		// Parse 4B Length + 4B Type
 		atomSize := binary.BigEndian.Uint32(atomHeader[:4])
 		atomType := string(atomHeader[4:8])
+		// by specs, atom size includes header, hence each atom is minimum 8 Bytes
 		if atomSize < 8 {
 			return fmt.Errorf("Invalid atom size %d for atom type %s\n", atomSize, atomType)
 		}
 		// Test if cursor is seeking correctly
 		// fmt.Println(atomType, atomSize)
 
-		// TODO: proper initialization
-		atomData := make([]byte, 0)
-
-		// if atomType == "moov" || atomType == "moof" {
-		if atomType != "mdat" {
-			// by specs, atom size includes header, hence each atom is minimum 8 Bytes
-			atomData = make([]byte, atomSize-8)
-			if _, err := io.ReadFull(pipe, atomData); err != nil {
-				return fmt.Errorf("Error reading atom data: %v\n", err)
-			}
+		atomData := make([]byte, atomSize-8)
+		if _, err := io.ReadFull(pipe, atomData); err != nil {
+			return fmt.Errorf("Error reading atom data: %v\n", err)
 		}
 
 		switch atomType {
@@ -92,19 +92,24 @@ func (stream *InputStream) readStream() error {
 				for _, client := range clients {
 					if client.new == true {
 						client.MarkAsPlaying() // after they will receive every moof and mdat
+						if _, err := client.conn.Write(fullAtom); err != nil {
+							client.Delete()
+						}
+					}
+				}
 			}
 			break
 
 		case "mdat":
-			sockets := make([]io.Writer, 0)
-			for _, val := range clients {
-				if val.new == false {
-					sockets = append(sockets, val.conn)
+			for _, client := range clients {
+				if client.new == false {
+					_, err := client.conn.Write(atomHeader)
+					_, err2 := client.conn.Write(atomData)
+					if err != nil || err2 != nil {
+						client.Delete()
+					}
 				}
 			}
-			broadcast := io.MultiWriter(sockets...)
-			broadcast.Write(atomHeader)
-			io.CopyN(broadcast, pipe, int64(atomSize-8))
 			break
 
 		// other atoms at root level are ignored

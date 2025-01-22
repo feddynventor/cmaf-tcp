@@ -10,12 +10,18 @@ import (
 	"time"
 )
 
+var clients = map[uint64]*Client{}
+
 type Client struct {
+	id   uint64
 	conn net.Conn
 	new  bool
 }
 
-var clients = map[uint64]Client{}
+func (c *Client) MarkAsPlaying() {
+	c.new = false
+	fmt.Println(c.conn.RemoteAddr(), "is now playing")
+}
 
 type InputStream struct {
 	pipe      *os.File
@@ -83,19 +89,9 @@ func (stream *InputStream) readStream() error {
 
 			// create MultiWriter for Broadcasting to players waiting for keyframe
 			if flags == 0xa05 {
-				// fmt.Print("keyframe ", extractSequenceNumber(fullAtom.Bytes()), clients, "\r")
-				sockets := make([]io.Writer, 0)
-				for id, val := range clients {
-					if val.new == true {
-						sockets = append(sockets, val.conn)
-						// TODO: how to properly edit instances inside map
-						instance := clients[id] // next they will receive mdat normally
-						instance.new = false
-						clients[id] = instance
-					}
-				}
-				broadcast := io.MultiWriter(sockets...)
-				broadcast.Write(fullAtom)
+				for _, client := range clients {
+					if client.new == true {
+						client.MarkAsPlaying() // after they will receive every moof and mdat
 			}
 			break
 
@@ -150,10 +146,8 @@ func main() {
 }
 
 func handleConnection(conn net.Conn, stream InputStream) {
-	// defer conn.Close()
-	// TODO: manage close
-
-	clients[uint64(time.Now().UnixNano())] = Client{conn: conn, new: true}
+	new_id := uint64(time.Now().UnixNano())
+	clients[new_id] = &Client{id: new_id, conn: conn, new: true}
 
 	fmt.Println("new conn", conn.RemoteAddr())
 

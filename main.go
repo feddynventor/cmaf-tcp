@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -30,105 +29,65 @@ func (c *Client) Delete() {
 }
 
 type InputStream struct {
-	pipe      *os.File
+	data      io.Reader
 	moov      []byte
 	timeStamp time.Time
 }
 
-func (stream *InputStream) readStream() error {
-	pipe := stream.pipe
-
+func atomParser(stream *InputStream, data io.Reader) {
 	// Each MP4 Fragment must start with MP4 header 4B + 4B
 	atomHeader := make([]byte, 8)
-
 	for {
-		// Blocking Read operation - Read exactly 8 Bytes
-		if _, err := io.ReadFull(pipe, atomHeader); err != nil {
-			return fmt.Errorf("Error reading atom header: %v\n", err)
+		if _, err := io.ReadFull(data, atomHeader); err != nil {
+			fmt.Println("Error reading atom header:", err)
+			return
 		}
-		// Parse 4B Length + 4B Type
 		atomSize := binary.BigEndian.Uint32(atomHeader[:4])
 		atomType := string(atomHeader[4:8])
 		// by specs, atom size includes header, hence each atom is minimum 8 Bytes
 		if atomSize < 8 {
-			return fmt.Errorf("Invalid atom size %d for atom type %s\n", atomSize, atomType)
+			fmt.Printf("Invalid atom size %d for atom type %s\n", atomSize, atomType)
+			return
 		}
-		// Test if cursor is seeking correctly
-		// fmt.Println(atomType, atomSize)
-
 		atomData := make([]byte, atomSize-8)
-		if _, err := io.ReadFull(pipe, atomData); err != nil {
-			return fmt.Errorf("Error reading atom data: %v\n", err)
+		if _, err := io.ReadFull(data, atomData); err != nil {
+			fmt.Println("Error reading atom data:", err)
+			return
 		}
-
 		switch atomType {
-
-		// moov gets stored as a byte slice
 		case "moov":
-			fullAtom := bytes.NewBuffer(append(atomHeader, atomData...))
-			stream.moov = fullAtom.Bytes()
+			fullAtom := append(atomHeader, atomData...)
+			stream.moov = fullAtom
 			stream.timeStamp = time.Now()
 			fmt.Println("Received moov atom at", stream.timeStamp)
 			break
-
-		// moof gets parsed for identifying keyframes
 		case "moof":
-			// fullAtom := bytes.NewBuffer(append(atomHeader, atomData...))
 			fullAtom := append(atomHeader, atomData...)
+			seq := extractSequenceNumber(fullAtom)
 			flags := getTrafAtom(fullAtom)
-
-			// normally distribute moof atom to whoever has already been playing
-			sockets := make([]io.Writer, 0)
-			for _, val := range clients {
-				if val.new == false {
-					sockets = append(sockets, val.conn)
-				}
-			}
-			broadcast := io.MultiWriter(sockets...)
-			broadcast.Write(fullAtom)
-
-			// create MultiWriter for Broadcasting to players waiting for keyframe
-			if flags == 0xa05 {
-				for _, client := range clients {
-					if client.new == true {
-						client.MarkAsPlaying() // after they will receive every moof and mdat
-						if _, err := client.conn.Write(fullAtom); err != nil {
-							client.Delete()
-						}
-					}
-				}
-			}
-			break
-
+			fmt.Println("moof", seq, flags)
 		case "mdat":
-			for _, client := range clients {
-				if client.new == false {
-					_, err := client.conn.Write(atomHeader)
-					_, err2 := client.conn.Write(atomData)
-					if err != nil || err2 != nil {
-						client.Delete()
-					}
-				}
-			}
-			break
-
-		// other atoms at root level are ignored
+			fmt.Println("mdat", atomSize)
 		default:
-			fmt.Println("Discarding atom", atomType)
+			fmt.Printf("Ignored atom: %s\n", atomType)
 		}
 	}
 }
 
 func main() {
 
-	pipe, err := os.OpenFile(os.Args[1], os.O_RDONLY, os.ModeNamedPipe)
+	namedPipe, err := os.OpenFile(os.Args[1], os.O_RDONLY, os.ModeNamedPipe)
 	if err != nil {
 		panic(err)
 	}
-	defer pipe.Close()
+	defer namedPipe.Close()
 
-	stream := InputStream{pipe: pipe}
-	go stream.readStream()
+	data, pipe := io.Pipe()
+
+	stream := InputStream{data: data}
+	parser := io.TeeReader(namedPipe, pipe)
+
+	go atomParser(&stream, parser)
 
 	listener, err := net.Listen("tcp", "0.0.0.0:8080")
 	if err != nil {
@@ -157,5 +116,7 @@ func handleConnection(conn net.Conn, stream InputStream) {
 	fmt.Println("new conn", conn.RemoteAddr())
 
 	conn.Write(stream.moov)
+
+	io.Copy(conn, stream.data)
 
 }

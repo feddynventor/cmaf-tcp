@@ -6,15 +6,20 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
+	"syscall"
 	"time"
+
+	"github.com/brucespang/go-tcpinfo"
+	"github.com/justincormack/go-memfd"
 )
 
-var clients = map[uint64]*Client{}
+var clients sync.Map
 
 type Client struct {
-	id   uint64
-	conn net.Conn
-	new  bool
+	conn    net.Conn
+	conn_fd *os.File
+	new     bool
 }
 
 func (c *Client) MarkAsPlaying() {
@@ -23,18 +28,28 @@ func (c *Client) MarkAsPlaying() {
 }
 
 func (c *Client) Delete() {
-	delete(clients, c.id)
+	clients.Delete(c.conn.RemoteAddr().String())
 	c.conn.Close()
+	c.conn_fd.Close()
 	fmt.Println(c.conn.RemoteAddr(), "disconnected")
 }
 
-type InputStream struct {
-	data      io.Reader
-	moov      []byte
-	timeStamp time.Time
+type Fragment struct {
+	moof       []byte
+	data       *memfd.Memfd
+	keyframe   bool
+	timestamp  int64
+	byteLength int
 }
 
-func atomParser(stream *InputStream, data io.Reader) {
+type InputStream struct {
+	moov          []byte
+	timeStamp     time.Time
+	lastSeqNumber uint32
+	fragments     sync.Map
+}
+
+func (stream *InputStream) atomParser(data io.Reader) {
 	// Each MP4 Fragment must start with MP4 header 4B + 4B
 	atomHeader := make([]byte, 8)
 	for {
@@ -54,20 +69,67 @@ func atomParser(stream *InputStream, data io.Reader) {
 			fmt.Println("Error reading atom data:", err)
 			return
 		}
+
+		if atomType != "mdat" && atomType != "moof" && atomType != "moov" {
+			continue
+		}
+		fullAtom := append(atomHeader, atomData...) // new slice with full atom
+
 		switch atomType {
 		case "moov":
-			fullAtom := append(atomHeader, atomData...)
-			stream.moov = fullAtom
+			stream.moov = fullAtom // TODO: assert, is this a copy?
 			stream.timeStamp = time.Now()
 			fmt.Println("Received moov atom at", stream.timeStamp)
 			break
 		case "moof":
-			fullAtom := append(atomHeader, atomData...)
 			seq := extractSequenceNumber(fullAtom)
 			flags := getTrafAtom(fullAtom)
-			fmt.Println("moof", seq, flags)
+			stream.lastSeqNumber = seq
+			stream.fragments.Store(seq, &Fragment{
+				moof:       fullAtom, // slices are passed by reference
+				keyframe:   flags == 0xa05,
+				byteLength: int(atomSize),
+				timestamp:  time.Since(stream.timeStamp).Milliseconds(), // TODO: get PTS
+			})
+			break
 		case "mdat":
-			fmt.Println("mdat", atomSize)
+			if fragment, ok := stream.fragments.Load(stream.lastSeqNumber); ok { // handles synchronization internally
+				file, _ := memfd.Create()
+				file.Write(fragment.(*Fragment).moof)
+				file.Write(fullAtom)
+				file.SetImmutable()
+				// fragment.(*Fragment).data = file // TODO: representation specific fragment file descriptor
+				file.Seek(0, io.SeekStart)
+				fragment.(*Fragment).byteLength += int(atomSize)
+				file.SetSize(int64(fragment.(*Fragment).byteLength))
+
+				clients.Range(func(key, value any) bool {
+					client := value.(*Client)
+					// client.conn_fd.ReadFrom(file) // TOSTUDY: offset is not implemented in TCPSock_Posix
+					// https://cs.opensource.google/go/go/+/refs/tags/go1.19.5:src/net/tcpsock_posix.go;drc=007d8f4db1f890f0d34018bb418bdc90ad4a8c35;l=47
+
+					offset := (int64)(0)
+					_, err := syscall.Sendfile(
+						int(client.conn_fd.Fd()),
+						int(file.Fd()),
+						&offset,
+						int(fragment.(*Fragment).byteLength))
+
+					if err != nil {
+						client.Delete()
+					} else {
+						tcpinfo, err := tcpinfo.GetsockoptTCPInfo(client.conn.(*net.TCPConn))
+						if err != nil {
+							fmt.Println("Error getting TCP info:", err)
+							// return
+						}
+						fmt.Printf("%+v\r\r\r\r\r", tcpinfo)
+					}
+
+					return true
+				})
+			}
+			break
 		default:
 			fmt.Printf("Ignored atom: %s\n", atomType)
 		}
@@ -82,12 +144,12 @@ func main() {
 	}
 	defer namedPipe.Close()
 
-	data, pipe := io.Pipe()
+	// #### 1 stream parser ####
 
-	stream := InputStream{data: data}
-	parser := io.TeeReader(namedPipe, pipe)
+	stream := InputStream{}
+	go stream.atomParser(namedPipe)
 
-	go atomParser(&stream, parser)
+	// #### Start TCP server ####
 
 	listener, err := net.Listen("tcp", "0.0.0.0:8080")
 	if err != nil {
@@ -103,20 +165,26 @@ func main() {
 			panic(err) // TODO: to properly manage
 		}
 
-		go handleConnection(conn, stream)
+		go handleConnection(&stream, conn)
 
 	}
 
 }
 
-func handleConnection(conn net.Conn, stream InputStream) {
-	new_id := uint64(time.Now().UnixNano())
-	clients[new_id] = &Client{id: new_id, conn: conn, new: true}
+func handleConnection(stream *InputStream, conn net.Conn) {
 
 	fmt.Println("new conn", conn.RemoteAddr())
 
 	conn.Write(stream.moov)
 
-	io.Copy(conn, stream.data)
+	conn_fd, _ := conn.(*net.TCPConn).File() // unmanaged
+
+	c := &Client{
+		conn:    conn,
+		conn_fd: conn_fd,
+		new:     true,
+	}
+
+	clients.Store(conn.RemoteAddr().String(), c)
 
 }

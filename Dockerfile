@@ -1,5 +1,7 @@
 FROM golang:alpine3.21
 
+RUN apk add --no-cache iproute2-tc
+
 WORKDIR /usr/src/goapp/
 USER root
 ADD ./go.mod /usr/src/goapp/
@@ -10,5 +12,8 @@ RUN go mod download
 ADD *.go /usr/src/goapp/
 RUN go mod tidy && go mod verify && go build -o main .
 
+COPY entry.sh /usr/src/goapp/
+RUN chmod +x entry.sh
+
 EXPOSE 8080
-ENTRYPOINT [ "./main" ]
+ENTRYPOINT [ "./entry.sh" ]

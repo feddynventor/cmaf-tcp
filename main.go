@@ -9,8 +9,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
-	"github.com/brucespang/go-tcpinfo"
 	"github.com/justincormack/go-memfd"
 )
 
@@ -20,6 +20,7 @@ type Client struct {
 	conn    net.Conn
 	conn_fd *os.File
 	new     bool
+	tcpInfo syscall.TCPInfo
 }
 
 func (c *Client) MarkAsPlaying() {
@@ -118,12 +119,15 @@ func (stream *InputStream) atomParser(data io.Reader) {
 					if err != nil {
 						client.Delete()
 					} else {
-						tcpinfo, err := tcpinfo.GetsockoptTCPInfo(client.conn.(*net.TCPConn))
-						if err != nil {
-							fmt.Println("Error getting TCP info:", err)
-							// return
+						size := unsafe.Sizeof(client.tcpInfo)
+						_, _, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, client.conn_fd.Fd(), syscall.SOL_TCP, syscall.TCP_INFO,
+							uintptr(unsafe.Pointer(&client.tcpInfo)), uintptr(unsafe.Pointer(&size)), 0)
+						if errno != 0 {
+							fmt.Printf("syscall failed. errno=%d", errno)
 						}
-						fmt.Printf("%+v\r\r\r\r\r", tcpinfo)
+
+						//fmt.Printf("%s %+v\n", time.Now().String(), client.tcpInfo)
+						fmt.Printf("%s,%d,%s\n", client.conn.RemoteAddr(), time.Now().UnixMicro(), csvLine(client.tcpInfo))
 					}
 
 					return true

@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-func csvLine(s syscall.TCPInfo) string {
+func csvLine(s unix.TCPInfo) string {
 	v := reflect.ValueOf(s)
 	record := []string{}
 	for i := 0; i < v.NumField(); i++ {

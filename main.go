@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/justincormack/go-memfd"
+	"golang.org/x/sys/unix"
 )
 
 var clients sync.Map
@@ -20,7 +21,7 @@ type Client struct {
 	conn    net.Conn
 	conn_fd *os.File
 	new     bool
-	tcpInfo syscall.TCPInfo
+	tcpInfo unix.TCPInfo
 }
 
 func (c *Client) MarkAsPlaying() {
@@ -119,15 +120,22 @@ func (stream *InputStream) atomParser(data io.Reader) {
 					if err != nil {
 						client.Delete()
 					} else {
-						size := unsafe.Sizeof(client.tcpInfo)
-						_, _, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, client.conn_fd.Fd(), syscall.SOL_TCP, syscall.TCP_INFO,
-							uintptr(unsafe.Pointer(&client.tcpInfo)), uintptr(unsafe.Pointer(&size)), 0)
+						size := uint32(unsafe.Sizeof(unix.TCPInfo{}))
+						_, _, errno := syscall.Syscall6(
+							syscall.SYS_GETSOCKOPT,
+							client.conn_fd.Fd(),
+							uintptr(syscall.IPPROTO_TCP),
+							uintptr(syscall.TCP_INFO),
+							uintptr(unsafe.Pointer(&client.tcpInfo)),
+							uintptr(unsafe.Pointer(&size)),
+							0,
+						)
+
 						if errno != 0 {
-							fmt.Printf("syscall failed. errno=%d", errno)
+							fmt.Println("Error getting TCP info:", errno)
 						}
 
-						//fmt.Printf("%s %+v\n", time.Now().String(), client.tcpInfo)
-						fmt.Printf("%s,%d,%s\n", client.conn.RemoteAddr(), time.Now().UnixMicro(), csvLine(client.tcpInfo))
+						fmt.Printf("%s,%d,%d,%s\n", client.conn.RemoteAddr(), time.Now().UnixMicro(), fragment.(*Fragment).byteLength, csvLine(client.tcpInfo))
 					}
 
 					return true

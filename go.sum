@@ -1,2 +1,4 @@
 github.com/justincormack/go-memfd v0.0.0-20170219213707-6e4af0518993 h1:YnMJVKw7M5rE15UsVY7w2cnxcnArci7v1g3butq0YbI=
 github.com/justincormack/go-memfd v0.0.0-20170219213707-6e4af0518993/go.mod h1:VYi8SD2j14Nh9hNT7l57A00YUx/tMxY6pPA1IGljdrg=
+golang.org/x/sys v0.29.0 h1:TPYlXGxvx1MGTn2GiZDhnjPA9wZzZeGKHHmKhHYvgaU=
+golang.org/x/sys v0.29.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=

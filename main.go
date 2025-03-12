@@ -124,8 +124,8 @@ func (stream *InputStream) atomParser(data io.Reader) {
 						_, _, errno := syscall.Syscall6(
 							syscall.SYS_GETSOCKOPT,
 							client.conn_fd.Fd(),
-							uintptr(syscall.IPPROTO_TCP),
-							uintptr(syscall.TCP_INFO),
+							uintptr(unix.SOL_TCP),
+							uintptr(unix.TCP_CC_INFO),
 							uintptr(unsafe.Pointer(&client.tcpInfo)),
 							uintptr(unsafe.Pointer(&size)),
 							0,
